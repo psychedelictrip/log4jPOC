@@ -1,0 +1,90 @@
+# Workflow name that appears in the GitHub Actions UI
+name: Generate, Sign, and Commit SBOM
+
+# Trigger the workflow on a push to the 'main' branch
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual triggering of the workflow
+
+# Define jobs in the workflow
+jobs:
+  # Job for generating and signing the SBOM
+  generate-and-sign-sbom:
+    runs-on: ubuntu-latest  # Specifies the runner environment
+    permissions:  # Sets permissions for the GitHub token
+      packages: write
+      id-token: write
+      contents: write
+    steps:
+      - name: Checkout code  # Checkout the repository code
+        uses: actions/checkout@v2
+
+      - name: Install Syft  # Install Syft for generating SBOM
+        run: |
+          # Download and install Syft script from the official source
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate SBOM in CycloneDX format  # Generate the SBOM
+        run: |
+          # Generate SBOM from the repository content and save it in CycloneDX JSON format
+          syft . -o cyclonedx-json=log4shell-vulnerable-app-CDX.json
+
+      - name: Upload SBOM as an artifact  # Upload SBOM as a build artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: SBOM
+          path: log4shell-vulnerable-app-CDX.json
+
+      - name: Install Cosign  # Install Cosign for signing artifacts
+        run: |
+          # Download Cosign, make it executable, and move to local bin
+          COSIGN_VERSION="v2.2.3"
+          wget https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64 -O cosign
+          chmod +x cosign
+          sudo mv cosign /usr/local/bin/
+
+      - name: Sign the SBOM and generate certificate  # Sign the SBOM and generate a verification certificate
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          # Use Cosign to sign the SBOM, specify OIDC issuer, and output both signature and certificate
+          cosign sign-blob --oidc-issuer="https://token.actions.githubusercontent.com" \
+          --yes \
+          --output-signature log4shell-vulnerable-app-CDX.json.sig \
+          --output-certificate log4shell-vulnerable-app-CDX.pem \
+          log4shell-vulnerable-app-CDX.json
+
+      - name: Commit SBOM, Signature, and Certificate to repository  # Commit the SBOM, signature, and certificate to the repo
+        run: |
+          # Configure git with user credentials, add files, and commit them to the repository
+          git config --local user.email "<your_email@example.com>"
+          git config --local user.name "<Your GitHub Username>"
+          git add log4shell-vulnerable-app-CDX.json log4shell-vulnerable-app-CDX.json.sig log4shell-vulnerable-app-CDX.pem
+          git commit -m "Add and Sign SBOM for log4shell-vulnerable-app"
+          git push
+
+  # Additional job for vulnerability analysis
+  vulnerability-analysis:
+    needs: generate-and-sign-sbom  # Dependency on the first job
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code  # Checkout the repository code again for analysis
+        uses: actions/checkout@v2
+
+      - name: Download SBOM artifact  # Download the previously uploaded SBOM artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: SBOM
+
+      - name: Install Grype  # Install Grype for vulnerability scanning
+        run: |
+          # Download and install Grype script from the official source
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run vulnerability analysis  # Perform vulnerability analysis on the SBOM
+        run: |
+          # Use Grype to scan the SBOM and output results in a table format
+          grype sbom:log4shell-vulnerable-app-CDX.json -o table
